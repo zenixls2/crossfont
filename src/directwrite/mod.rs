@@ -4,6 +4,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
+// use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+use crate::{Info, RasterizeExt};
 
 use dwrote::{
     FontCollection, FontFace, FontFallback, FontStretch, FontStyle, FontWeight, GlyphOffset,
@@ -11,12 +14,16 @@ use dwrote::{
 };
 
 use winapi::shared::ntdef::{HRESULT, LOCALE_NAME_MAX_LENGTH};
+use winapi::shared::winerror::*;
 use winapi::um::dwrite;
+use winapi::um::unknwnbase::IUnknown;
 use winapi::um::winnls::GetUserDefaultLocaleName;
+use winapi::Interface;
+use wio::com::ComPtr;
 
 use super::{
-    BitmapBuffer, Error, FontDesc, FontKey, GlyphKey, Metrics, RasterizedGlyph, Size, Slant, Style,
-    Weight,
+    BitmapBuffer, Error, FontDesc, FontKey, GlyphKey, KeyType, Metrics, RasterizedGlyph, Size,
+    Slant, Style, Weight,
 };
 
 /// DirectWrite uses 0 for missing glyph symbols.
@@ -38,6 +45,8 @@ pub struct DirectWriteRasterizer {
     device_pixel_ratio: f32,
     available_fonts: FontCollection,
     fallback_sequence: Option<FontFallback>,
+    analyzer: ComPtr<dwrite::IDWriteTextAnalyzer>,
+    locale: Vec<u16>,
 }
 
 impl DirectWriteRasterizer {
@@ -45,7 +54,6 @@ impl DirectWriteRasterizer {
         &self,
         face: &FontFace,
         size: Size,
-        character: char,
         glyph_index: u16,
     ) -> Result<RasterizedGlyph, Error> {
         let em_size = em_size(size);
@@ -85,7 +93,7 @@ impl DirectWriteRasterizer {
         );
 
         Ok(RasterizedGlyph {
-            character,
+            character: KeyType::GlyphIndex(glyph_index.into()),
             width: (bounds.right - bounds.left) as i32,
             height: (bounds.bottom - bounds.top) as i32,
             top: -bounds.top,
@@ -98,8 +106,14 @@ impl DirectWriteRasterizer {
         self.fonts.get(&font_key).ok_or(Error::UnknownFontKey)
     }
 
-    fn get_glyph_index(&self, face: &FontFace, character: char) -> u16 {
-        face.get_glyph_indices(&[character as u32]).first().copied().unwrap_or(MISSING_GLYPH_INDEX)
+    #[inline]
+    fn get_char_index(&self, face: &FontFace, c: char) -> u16 {
+        face.get_glyph_indices(&[c as u32])
+            .first()
+            // DirectWrite returns 0 if the glyph does not exist in the font.
+            .filter(|glyph_index| **glyph_index != 0)
+            .copied()
+            .unwrap_or(MISSING_GLYPH_INDEX)
     }
 
     fn get_fallback_font(&self, loaded_font: &Font, character: char) -> Option<dwrote::Font> {
@@ -135,13 +149,36 @@ impl DirectWriteRasterizer {
 }
 
 impl crate::Rasterize for DirectWriteRasterizer {
-    fn new(device_pixel_ratio: f32, _: bool) -> Result<DirectWriteRasterizer, Error> {
+    fn new(
+        device_pixel_ratio: f32,
+        _: bool,
+        _ligatures: bool,
+    ) -> Result<DirectWriteRasterizer, Error> {
+        let analyzer = unsafe {
+            let mut factory: *mut dwrite::IDWriteFactory = std::ptr::null_mut();
+            let hr = dwrite::DWriteCreateFactory(
+                dwrite::DWRITE_FACTORY_TYPE_SHARED,
+                &dwrite::IDWriteFactory::uuidof(),
+                &mut factory as *mut *mut dwrite::IDWriteFactory as *mut *mut IUnknown,
+            );
+            assert_eq!(hr, 0, "error creating dwrite factory");
+            let mut native: *mut dwrite::IDWriteTextAnalyzer = std::ptr::null_mut();
+            let hr = (*factory).CreateTextAnalyzer(&mut native);
+            assert_eq!(hr, 0, "IDWriteTextAnalyzer init fail");
+            factory.as_ref().map(|x| x.Release());
+            ComPtr::from_raw(native)
+        };
+        let mut locale = vec![0u16; LOCALE_NAME_MAX_LENGTH];
+        let _locale_len =
+            unsafe { GetUserDefaultLocaleName(locale.as_mut_ptr(), locale.len() as i32) };
         Ok(DirectWriteRasterizer {
             fonts: HashMap::new(),
             keys: HashMap::new(),
             device_pixel_ratio,
             available_fonts: FontCollection::system(),
             fallback_sequence: FontFallback::get_system_fallback(),
+            analyzer,
+            locale,
         })
     }
 
@@ -165,7 +202,7 @@ impl crate::Rasterize for DirectWriteRasterizer {
 
         // Since all monospace characters have the same width, we use `!` for horizontal metrics.
         let character = '!';
-        let glyph_index = self.get_glyph_index(face, character);
+        let glyph_index = self.get_char_index(face, character);
 
         let glyph_metrics = face.get_design_glyph_metrics(&[glyph_index], false);
         let hmetrics = glyph_metrics.first().ok_or(Error::MetricsNotFound)?;
@@ -232,17 +269,32 @@ impl crate::Rasterize for DirectWriteRasterizer {
 
         let loaded_fallback_font;
         let mut font = loaded_font;
-        let mut glyph_index = self.get_glyph_index(&loaded_font.face, glyph.character);
-        if glyph_index == MISSING_GLYPH_INDEX {
-            if let Some(fallback_font) = self.get_fallback_font(&loaded_font, glyph.character) {
-                loaded_fallback_font = Font::from(fallback_font);
-                glyph_index = self.get_glyph_index(&loaded_fallback_font.face, glyph.character);
-                font = &loaded_fallback_font;
-            }
-        }
+        let glyph_index = match glyph.id {
+            KeyType::Char(character) => {
+                let mut index = self.get_char_index(&loaded_font.face, character);
+                if index == MISSING_GLYPH_INDEX {
+                    if let Some(fallback_font) = self.get_fallback_font(&loaded_font, character) {
+                        loaded_fallback_font = Font::from(fallback_font);
+                        font = &loaded_fallback_font;
+                        index = self.get_char_index(&loaded_fallback_font.face, character);
+                    }
+                }
+                index
+            },
+            KeyType::GlyphIndex(index) => index as u16,
+            KeyType::Placeholder => {
+                return Ok(RasterizedGlyph {
+                    character: KeyType::Placeholder,
+                    width: 0,
+                    height: 0,
+                    top: 0,
+                    left: 0,
+                    buffer: BitmapBuffer::RGB(Vec::new()),
+                });
+            },
+        };
 
-        let rasterized_glyph =
-            self.rasterize_glyph(&font.face, glyph.size, glyph.character, glyph_index)?;
+        let rasterized_glyph = self.rasterize_glyph(&font.face, glyph.size, glyph_index)?;
 
         if glyph_index == MISSING_GLYPH_INDEX {
             Err(Error::MissingGlyph(rasterized_glyph))
@@ -253,6 +305,88 @@ impl crate::Rasterize for DirectWriteRasterizer {
 
     fn update_dpr(&mut self, device_pixel_ratio: f32) {
         self.device_pixel_ratio = device_pixel_ratio;
+    }
+}
+
+impl RasterizeExt for DirectWriteRasterizer {
+    fn shape(&mut self, text: &str, font_key: FontKey) -> Vec<Info> {
+        let face = &self.get_loaded_font(font_key).unwrap().face;
+        unsafe {
+            let string: Vec<u16> = text.encode_utf16().collect();
+            let max_glyphs = 3 * string.len() as u32 / 2 + 16;
+            let mut cluster_map = vec![0u16; string.len()];
+            let mut text_props = vec![dwrite::DWRITE_SHAPING_TEXT_PROPERTIES { bit_fields: 0 }];
+            let mut glyph_indices = vec![0u16; max_glyphs as usize];
+            let mut glyph_props = vec![dwrite::DWRITE_SHAPING_GLYPH_PROPERTIES { bit_fields: 0 }];
+
+            let mut analysis = dwrite::DWRITE_SCRIPT_ANALYSIS {
+                script: 0,
+                shapes: dwrite::DWRITE_SCRIPT_SHAPES_DEFAULT,
+            };
+            let liga = dwrite::DWRITE_FONT_FEATURE {
+                nameTag: dwrite::DWRITE_FONT_FEATURE_TAG_STANDARD_LIGATURES,
+                parameter: 1,
+            };
+            let calt = dwrite::DWRITE_FONT_FEATURE {
+                nameTag: dwrite::DWRITE_FONT_FEATURE_TAG_CONTEXTUAL_ALTERNATES,
+                parameter: 1,
+            };
+            let mut features_unit = dwrite::DWRITE_TYPOGRAPHIC_FEATURES {
+                features: [liga, calt].as_mut_ptr(),
+                featureCount: 2,
+            };
+            let features =
+                [&mut features_unit as *const dwrite::DWRITE_TYPOGRAPHIC_FEATURES].as_mut_ptr();
+            let mut glyph_count = 0u32;
+            let hr = (*self.analyzer).GetGlyphs(
+                string.as_ptr(),
+                string.len() as u32,
+                face.as_ptr(),
+                false as winapi::ctypes::c_int,
+                false as winapi::ctypes::c_int,
+                &mut analysis as *const _ as *mut _,
+                self.locale.as_ptr(),
+                std::ptr::null_mut(), // self.substitution.as_mut_ptr(),
+                features,
+                [string.len() as u32].as_ptr(),
+                1,
+                max_glyphs,
+                cluster_map.as_mut_ptr(),
+                text_props.as_mut_ptr(),
+                glyph_indices.as_mut_ptr(),
+                glyph_props.as_mut_ptr(),
+                &mut glyph_count as *mut _,
+            );
+            if hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) {
+                panic!("invalid parameter");
+            }
+            assert_eq!(hr, 0, "error get glyphs");
+            assert!(
+                glyph_count <= string.len() as u32,
+                "glyph count more then string len is currently unsupported"
+            );
+            // not pretty sure about the mapping of cluster.
+            // and if codepoint won't be zero, there's no meaning to do such conversion.
+            let mut state = -1;
+            let clusters: Vec<u32> = cluster_map
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, shift)| {
+                    if state == *shift as i32 {
+                        None
+                    } else {
+                        state = *shift as i32;
+                        Some(i as u32)
+                    }
+                })
+                .collect();
+            glyph_indices
+                .iter()
+                .take(glyph_count as usize)
+                .enumerate()
+                .map(|(i, codepoint)| Info { codepoint: *codepoint as u32, cluster: clusters[i] })
+                .collect()
+        }
     }
 }
 
@@ -320,5 +454,72 @@ impl From<HRESULT> for Error {
     fn from(hresult: HRESULT) -> Self {
         let message = format!("a DirectWrite rendering error occurred: {:X}", hresult);
         Error::PlatformError(message)
+    }
+}
+mod tests {
+    #[test]
+    fn build_font_and_get_glyph() {
+        use super::*;
+        use crate::Rasterize;
+        let mut rasterizer = DirectWriteRasterizer::new(6., false, true).unwrap();
+        let font = rasterizer
+            .load_font(
+                &FontDesc {
+                    name: "Consolas".to_string(),
+                    style: Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+                },
+                Size::new(12.),
+            )
+            .unwrap();
+        for c in &['a', 'b', '!', '日'] {
+            let key = GlyphKey { id: KeyType::Char(*c), font_key: font, size: Size::new(12.) };
+            let glyph = rasterizer.get_glyph(key).unwrap();
+            let buf = match &glyph.buffer {
+                BitmapBuffer::RGB(buf) => buf,
+                BitmapBuffer::RGBA(buf) => buf,
+            };
+
+            // Debug the glyph
+            for row in 0..glyph.height {
+                for col in 0..glyph.width {
+                    let index = ((glyph.width * 3 * row) + (col * 3)) as usize;
+                    let value = buf[index];
+                    let c = match value {
+                        0..=50 => ' ',
+                        51..=100 => '.',
+                        101..=150 => '~',
+                        151..=200 => '*',
+                        201..=255 => '#',
+                    };
+                    print!("{}", c);
+                }
+                println!();
+            }
+        }
+    }
+    #[test]
+    fn shape() {
+        use super::*;
+        use crate::Rasterize;
+        let mut r = DirectWriteRasterizer::new(1.0, false, true).unwrap();
+        let font_desc = FontDesc::new("Consolas", Style::Specific("Regular".to_string()));
+        let font_key = r.load_font(&font_desc, Size(16)).unwrap();
+
+        let face = &r.get_loaded_font(font_key).unwrap().face;
+        let v: Vec<u16> =
+            ['-', '-', '>', '<', '-'].iter().map(|c| r.get_char_index(&face, *c)).collect();
+        println!("{:?}", v);
+
+        let infos = r.shape("--><-", font_key);
+        println!("{:?}", infos);
+
+        let mut key = GlyphKey { id: 0.into(), font_key, size: Size(16) };
+        for (info, index) in infos.into_iter().zip(v.into_iter()) {
+            if info.codepoint != 0 {
+                assert_eq!(info.codepoint, index as u32);
+                key.id = info.codepoint.into();
+                r.get_glyph(key).unwrap();
+            }
+        }
     }
 }

@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use std::ptr;
 
 use core_foundation::array::{CFArray, CFIndex};
+use core_foundation::attributed_string::CFAttributedStringCreate;
+use core_foundation::base::{kCFAllocatorDefault, TCFType};
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_graphics::base::kCGImageAlphaPremultipliedFirst;
 use core_graphics::color_space::CGColorSpace;
@@ -25,6 +29,8 @@ use core_text::font_descriptor::kCTFontHorizontalOrientation;
 use core_text::font_descriptor::kCTFontVerticalOrientation;
 use core_text::font_descriptor::SymbolicTraitAccessors;
 use core_text::font_descriptor::{CTFontDescriptor, CTFontOrientation};
+use core_text::line::CTLine;
+use core_text::string_attributes::*;
 
 use cocoa::base::{id, nil, NO};
 use cocoa::foundation::{NSOperatingSystemVersion, NSProcessInfo, NSString, NSUserDefaults};
@@ -35,8 +41,8 @@ pub mod byte_order;
 use byte_order::kCGBitmapByteOrder32Host;
 
 use super::{
-    BitmapBuffer, Error, FontDesc, FontKey, GlyphKey, Metrics, RasterizedGlyph, Size, Slant, Style,
-    Weight,
+    BitmapBuffer, Error, FontDesc, FontKey, GlyphKey, Info, KeyType, Metrics, Rasterize,
+    RasterizeExt, RasterizedGlyph, Size, Slant, Style, Weight,
 };
 
 /// According to the documentation, the index of 0 must be a missing glyph character:
@@ -128,8 +134,48 @@ pub struct Rasterizer {
     use_thin_strokes: bool,
 }
 
-impl crate::Rasterize for Rasterizer {
-    fn new(device_pixel_ratio: f32, use_thin_strokes: bool) -> Result<Rasterizer, Error> {
+impl RasterizeExt for Rasterizer {
+    fn shape(&mut self, text: &str, font_key: FontKey) -> Vec<Info> {
+        let font = self.fonts.get(&font_key).unwrap();
+        let dic_imm: CFDictionary<CFString, _> = unsafe {
+            CFDictionary::from_CFType_pairs(&[
+                (
+                    TCFType::wrap_under_get_rule(kCTLigatureAttributeName),
+                    CFNumber::from(2).as_CFType(),
+                ),
+                (TCFType::wrap_under_get_rule(kCTFontAttributeName), font.ct_font.as_CFType()),
+            ])
+        };
+        let line = unsafe {
+            let astr_ref = CFAttributedStringCreate(
+                kCFAllocatorDefault,
+                CFString::new(text).as_concrete_TypeRef(),
+                dic_imm.into_untyped().as_concrete_TypeRef(),
+            );
+            CTLine::new_with_attributed_string(astr_ref)
+        };
+        line.glyph_runs()
+            .iter()
+            .flat_map(|r| {
+                r.glyphs()
+                    .iter()
+                    .zip(r.string_indices().iter())
+                    .map(|(codepoint, cluster)| Info {
+                        codepoint: *codepoint as u32,
+                        cluster: *cluster as u32,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+}
+
+impl Rasterize for Rasterizer {
+    fn new(
+        device_pixel_ratio: f32,
+        use_thin_strokes: bool,
+        _ligatures: bool,
+    ) -> Result<Rasterizer, Error> {
         Ok(Rasterizer {
             fonts: HashMap::new(),
             keys: HashMap::new(),
@@ -163,22 +209,44 @@ impl crate::Rasterize for Rasterizer {
         // Get loaded font.
         let font = self.fonts.get(&glyph.font_key).ok_or(Error::UnknownFontKey)?;
 
-        // Find a font where the given character is present.
-        let (font, glyph_index) = iter::once(font)
-            .chain(font.fallbacks.iter())
-            .find_map(|font| match font.glyph_index(glyph.character) {
-                MISSING_GLYPH_INDEX => None,
-                glyph_index => Some((font, glyph_index)),
-            })
-            .unwrap_or((font, MISSING_GLYPH_INDEX));
-
-        let glyph = font.get_glyph(glyph.character, glyph_index, self.use_thin_strokes);
-
-        if glyph_index == MISSING_GLYPH_INDEX {
-            Err(Error::MissingGlyph(glyph))
-        } else {
-            Ok(glyph)
+        // If glyph is index type.
+        if let KeyType::GlyphIndex(glyph_index) = glyph.id {
+            let glyph = font.get_glyph(glyph_index, self.use_thin_strokes);
+            if glyph_index == MISSING_GLYPH_INDEX {
+                return Err(Error::MissingGlyph(glyph));
+            } else {
+                return Ok(glyph);
+            }
         }
+
+        if let KeyType::Char(character) = glyph.id {
+            // Find a font where the given character is present.
+            let (font, glyph_index) = iter::once(font)
+                .chain(font.fallbacks.iter())
+                .find_map(|font| match font.glyph_index(character) {
+                    MISSING_GLYPH_INDEX => None,
+                    glyph_index => Some((font, glyph_index)),
+                })
+                .unwrap_or((font, MISSING_GLYPH_INDEX));
+
+            let glyph = font.get_glyph(glyph_index, self.use_thin_strokes);
+
+            if glyph_index == MISSING_GLYPH_INDEX {
+                return Err(Error::MissingGlyph(glyph));
+            } else {
+                return Ok(glyph);
+            }
+        }
+
+        // Placeholder
+        Ok(RasterizedGlyph {
+            character: KeyType::Placeholder,
+            width: 0,
+            height: 0,
+            top: 0,
+            left: 0,
+            buffer: BitmapBuffer::RGB(Vec::new()),
+        })
     }
 
     fn update_dpr(&mut self, device_pixel_ratio: f32) {
@@ -392,12 +460,7 @@ impl Font {
         }
     }
 
-    pub fn get_glyph(
-        &self,
-        character: char,
-        glyph_index: u32,
-        use_thin_strokes: bool,
-    ) -> RasterizedGlyph {
+    pub fn get_glyph(&self, glyph_index: u32, use_thin_strokes: bool) -> RasterizedGlyph {
         let bounds = self
             .ct_font
             .get_bounding_rects_for_glyphs(CTFontOrientation::default(), &[glyph_index as CGGlyph]);
@@ -411,7 +474,7 @@ impl Font {
 
         if rasterized_width == 0 || rasterized_height == 0 {
             return RasterizedGlyph {
-                character: ' ',
+                character: KeyType::Placeholder,
                 width: 0,
                 height: 0,
                 top: 0,
@@ -476,7 +539,7 @@ impl Font {
         };
 
         RasterizedGlyph {
-            character,
+            character: KeyType::GlyphIndex(glyph_index),
             left: rasterized_left,
             top: (bounds.size.height + bounds.origin.y).ceil() as i32,
             width: rasterized_width as i32,
@@ -539,7 +602,7 @@ mod tests {
             // Get a glyph.
             for character in &['a', 'b', 'c', 'd'] {
                 let glyph_index = font.glyph_index(*character);
-                let glyph = font.get_glyph(*character, glyph_index, false);
+                let glyph = font.get_glyph(glyph_index, false);
 
                 let buffer = match &glyph.buffer {
                     BitmapBuffer::RGB(buffer) | BitmapBuffer::RGBA(buffer) => buffer,
@@ -563,5 +626,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shape() {
+        use super::*;
+        let mut r = Rasterizer::new(1.0, false, true).unwrap();
+        let font_desc = FontDesc::new("Menlo", Style::Specific("Regular".to_string()));
+        let font_key = r.load_font(&font_desc, Size(16)).unwrap();
+        let infos = r.shape("--><-", font_key);
+        println!("{:?}", infos);
     }
 }
