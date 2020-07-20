@@ -35,8 +35,8 @@ pub mod byte_order;
 use byte_order::kCGBitmapByteOrder32Host;
 
 use super::{
-    BitmapBuffer, Error, FontDesc, FontKey, GlyphKey, Metrics, RasterizedGlyph, Size, Slant, Style,
-    Weight,
+    BitmapBuffer, Error, FontDesc, FontKey, GlyphKey, KeyType, Metrics, RasterizedGlyph, Size,
+    Slant, Style, Weight,
 };
 
 /// According to the documentation, the index of 0 must be a missing glyph character:
@@ -129,7 +129,13 @@ pub struct Rasterizer {
 }
 
 impl crate::Rasterize for Rasterizer {
-    fn new(device_pixel_ratio: f32, use_thin_strokes: bool) -> Result<Rasterizer, Error> {
+    type Err = Error;
+
+    fn new(
+        device_pixel_ratio: f32,
+        use_thin_strokes: bool,
+        _ligatures: bool,
+    ) -> Result<Rasterizer, Error> {
         Ok(Rasterizer {
             fonts: HashMap::new(),
             keys: HashMap::new(),
@@ -163,21 +169,43 @@ impl crate::Rasterize for Rasterizer {
         // Get loaded font.
         let font = self.fonts.get(&glyph.font_key).ok_or(Error::UnknownFontKey)?;
 
-        // Find a font where the given character is present.
-        let (font, glyph_index) = iter::once(font)
-            .chain(font.fallbacks.iter())
-            .find_map(|font| match font.glyph_index(glyph.character) {
-                MISSING_GLYPH_INDEX => None,
-                glyph_index => Some((font, glyph_index)),
-            })
-            .unwrap_or((font, MISSING_GLYPH_INDEX));
+        // If glyph is index type.
+        if let KeyType::GlyphIndex(glyph_index) = glyph.id {
+            let glyph = font.get_glyph(glyph_index, self.use_thin_strokes);
+            if glyph_index == MISSING_GLYPH_INDEX {
+                return Err(Error::MissingGlyph(glyph));
+            } else {
+                return Ok(glyph);
+            }
+        }
 
-        let glyph = font.get_glyph(glyph.character, glyph_index, self.use_thin_strokes);
+        if let KeyType::Char(character) = glyph.id {
+            // Find a font where the given character is present.
+            let (font, glyph_index) = iter::once(font)
+                .chain(font.fallbacks.iter())
+                .find_map(|font| match font.glyph_index(character) {
+                    MISSING_GLYPH_INDEX => None,
+                    glyph_index => Some((font, glyph_index)),
+                })
+                .unwrap_or((font, MISSING_GLYPH_INDEX));
 
-        if glyph_index == MISSING_GLYPH_INDEX {
-            Err(Error::MissingGlyph(glyph))
-        } else {
-            Ok(glyph)
+            let glyph = font.get_glyph(glyph_index, self.use_thin_strokes);
+
+            if glyph_index == MISSING_GLYPH_INDEX {
+                return Err(Error::MissingGlyph(glyph));
+            } else {
+                return Ok(glyph);
+            }
+        }
+
+        // Placeholder
+        RasterizedGlyph {
+            character: KeyType::Placeholder,
+            width: 0,
+            height: 0,
+            top: 0,
+            left: 0,
+            buffer: BitmapBuffer::RGB(Vec::new()),
         }
     }
 
@@ -392,15 +420,8 @@ impl Font {
         }
     }
 
-    pub fn get_glyph(
-        &self,
-        character: char,
-        glyph_index: u32,
-        use_thin_strokes: bool,
-    ) -> RasterizedGlyph {
-        let bounds = self
-            .ct_font
-            .get_bounding_rects_for_glyphs(CTFontOrientation::default(), &[glyph_index as CGGlyph]);
+    pub fn get_glyph(&self, glyph_index: u32, use_thin_strokes: bool) -> RasterizedGlyph {
+        let bounds = self.bounding_rect_for_glyph(Default::default(), glyph_index);
 
         let rasterized_left = bounds.origin.x.floor() as i32;
         let rasterized_width =
@@ -411,7 +432,7 @@ impl Font {
 
         if rasterized_width == 0 || rasterized_height == 0 {
             return RasterizedGlyph {
-                character: ' ',
+                character: KeyType::Placeholder,
                 width: 0,
                 height: 0,
                 top: 0,
@@ -476,7 +497,7 @@ impl Font {
         };
 
         RasterizedGlyph {
-            character,
+            character: KeyType::GlyphIndex(glyph_index),
             left: rasterized_left,
             top: (bounds.size.height + bounds.origin.y).ceil() as i32,
             width: rasterized_width as i32,
@@ -539,7 +560,7 @@ mod tests {
             // Get a glyph.
             for character in &['a', 'b', 'c', 'd'] {
                 let glyph_index = font.glyph_index(*character);
-                let glyph = font.get_glyph(*character, glyph_index, false);
+                let glyph = font.get_glyph((*character).into(), glyph_index, false);
 
                 let buffer = match &glyph.buffer {
                     BitmapBuffer::RGB(buffer) | BitmapBuffer::RGBA(buffer) => buffer,
