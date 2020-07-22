@@ -274,6 +274,7 @@ pub trait Rasterize {
     fn update_dpr(&mut self, device_pixel_ratio: f32);
 }
 
+#[derive(Clone, Debug)]
 pub struct Info {
     pub codepoint: u32,
     pub cluster: u32,

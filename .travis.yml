@@ -33,4 +33,4 @@ install:
 
 script:
   - if [ "$CLIPPY" == "true" ]; then cargo clippy; fi
-  - if [ "$CLIPPY" != "true" ]; then cargo test; fi
+  - if [ "$CLIPPY" != "true" ]; then cargo test -- --nocapture; fi

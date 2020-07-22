@@ -121,7 +121,10 @@ impl RasterizeExt for Rasterizer {
         let font = self.fonts.get(&font_key).unwrap();
         let dic_imm: CFDictionary<CFString, _> = unsafe {
             CFDictionary::from_CFType_pairs(&[
-                (TCFType::wrap_under_get_rule(kCTLigatureAttributeName), CFNumber::from(2).as_CFType()),
+                (
+                    TCFType::wrap_under_get_rule(kCTLigatureAttributeName),
+                    CFNumber::from(2).as_CFType(),
+                ),
                 (TCFType::wrap_under_get_rule(kCTFontAttributeName), font.ct_font.as_CFType()),
             ])
         };
@@ -136,12 +139,14 @@ impl RasterizeExt for Rasterizer {
         line.glyph_runs()
             .iter()
             .flat_map(|r| {
-                r.glyphs().iter().zip(r.string_indices().iter()).map(
-                    |(codepoint, cluster)| Info {
+                r.glyphs()
+                    .iter()
+                    .zip(r.string_indices().iter())
+                    .map(|(codepoint, cluster)| Info {
                         codepoint: *codepoint as u32,
                         cluster: *cluster as u32,
-                    },
-                ).collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -671,5 +676,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shape() {
+        use super::*;
+        let mut r = Rasterizer::new(1.0, false, true).unwrap();
+        let font_desc = FontDesc::new("Menlo", Style::Specific("Regular".to_string()));
+        let font_key = r.load_font(&font_desc, Size(16)).unwrap();
+        let infos = r.shape("--><-", font_key);
+        println!("{:?}", infos);
     }
 }
