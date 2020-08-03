@@ -19,7 +19,7 @@ log = "0.4"
 [target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 servo-fontconfig = "0.5.1"
 freetype-rs = "0.26"
-harfbuzz_rs = { git = "https://github.com/zenixls2/harfbuzz_rs", default-features = false, features = ["build-native-harfbuzz"] }
+harfbuzz_rs = { version = "1.2.0", default-features = false, features = ["build-native-harfbuzz"] }
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.build-dependencies]
 pkg-config = "0.3"
