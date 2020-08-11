@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
 use std::os::windows::ffi::OsStringExt;
@@ -43,9 +42,13 @@ impl DirectWriteRasterizer {
         &self,
         face: &FontFace,
         size: Size,
-        glyph: GlyphKey,
+        glyph_key: GlyphKey,
     ) -> Result<RasterizedGlyph, Error> {
-        let glyph_index = self.get_glyph_index(face, glyph)?;
+        let glyph_index = match glyph_key.id {
+            KeyType::GlyphIndex(i) => i as u16,
+            KeyType::Char(c) => self.get_char_index(face, c)?,
+            KeyType::Placeholder => self.get_char_index(face, ' ')?,
+        };
 
         let em_size = em_size(size);
 
@@ -86,7 +89,7 @@ impl DirectWriteRasterizer {
             .map_err(Error::DirectWriteError)?;
 
         Ok(RasterizedGlyph {
-            c: glyph.id,
+            c: glyph_key.id,
             width: (bounds.right - bounds.left) as i32,
             height: (bounds.bottom - bounds.top) as i32,
             top: -bounds.top,
@@ -108,14 +111,6 @@ impl DirectWriteRasterizer {
             .filter(|glyph_index| **glyph_index != 0)
             .ok_or_else(|| Error::MissingGlyph(c))?;
         Ok(idx)
-    }
-
-    fn get_glyph_index(&self, face: &FontFace, glyph: GlyphKey) -> Result<u16, Error> {
-        match glyph.id {
-            KeyType::GlyphIndex(i) => Ok(i.try_into().unwrap()),
-            KeyType::Placeholder => self.get_char_index(face, ' '),
-            KeyType::Char(c) => self.get_char_index(face, c),
-        }
     }
 
     fn get_fallback_font(&self, loaded_font: &Font, c: char) -> Option<dwrote::Font> {
