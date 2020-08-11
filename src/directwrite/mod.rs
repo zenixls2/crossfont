@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 
@@ -105,14 +104,6 @@ impl DirectWriteRasterizer {
             // DirectWrite returns 0 if the glyph does not exist in the font.
             .filter(|glyph_index| **glyph_index != 0)
             .unwrap_or(MISSING_GLYPH_INDEX)
-    }
-
-    fn get_glyph_index(&self, face: &FontFace, glyph: GlyphKey) -> u16 {
-        match glyph.id {
-            KeyType::GlyphIndex(i) => i.try_into().unwrap(),
-            KeyType::Placeholder => self.get_char_index(face, ' '),
-            KeyType::Char(c) => self.get_char_index(face, c),
-        }
     }
 
     fn get_fallback_font(&self, loaded_font: &Font, character: char) -> Option<dwrote::Font> {
@@ -251,12 +242,12 @@ impl crate::Rasterize for DirectWriteRasterizer {
         let mut font = loaded_font;
         let glyph_index = match glyph.id {
             KeyType::Char(character) => {
-                let mut index = self.get_glyph_index(&loaded_font.face, character);
+                let mut index = self.get_char_index(&loaded_font.face, character);
                 if index == MISSING_GLYPH_INDEX {
                     if let Some(fallback_font) = self.get_fallback_font(&loaded_font, character) {
                         loaded_fallback_font = Font::from(fallback_font);
                         font = &loaded_fallback_font;
-                        index = self.get_glyph_index(&loaded_fallback_font.face, character);
+                        index = self.get_char_index(&loaded_fallback_font.face, character);
                     }
                 }
                 index
