@@ -343,3 +343,46 @@ impl TextAnalysisSourceMethods for TextAnalysisSourceData<'_> {
         dwrite::DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
     }
 }
+
+mod tests {
+    #[test]
+    fn build_font_and_get_glyph() {
+        use crate::Rasterize;
+        use super::*;
+        let mut rasterizer = DirectWriteRasterizer::new(6., false, true).unwrap();
+        let font = rasterizer
+            .load_font(
+                &FontDesc {
+                    name: "Consolas".to_string(),
+                    style: Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+                },
+                Size::new(12.),
+            )
+            .unwrap();
+        for c in &['a', 'b', '!', '日'] {
+            let key = GlyphKey { id: KeyType::Char(*c), font_key: font, size: Size::new(12.) };
+            let glyph = rasterizer.get_glyph(key).unwrap();
+            let buf = match &glyph.buf {
+                BitmapBuffer::RGB(buf) => buf,
+                BitmapBuffer::RGBA(buf) => buf,
+            };
+
+            // Debug the glyph
+            for row in 0..glyph.height {
+                for col in 0..glyph.width {
+                    let index = ((glyph.width * 3 * row) + (col * 3)) as usize;
+                    let value = buf[index];
+                    let c = match value {
+                        0..=50 => ' ',
+                        51..=100 => '.',
+                        101..=150 => '~',
+                        151..=200 => '*',
+                        201..=255 => '#',
+                    };
+                    print!("{}", c);
+                }
+                println!();
+            }
+        }
+    }
+}
