@@ -4,7 +4,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
+// use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
 use crate::{Info, RasterizeExt};
 
@@ -15,6 +16,7 @@ use dwrote::{
 
 use lazy_static::lazy_static;
 use winapi::shared::ntdef::{HRESULT, LOCALE_NAME_MAX_LENGTH};
+use winapi::shared::winerror::*;
 use winapi::um::dwrite;
 use winapi::um::unknwnbase::IUnknown;
 use winapi::um::winnls::GetUserDefaultLocaleName;
@@ -301,18 +303,6 @@ lazy_static! {
             sub as usize
         }
     };
-    static ref DWRITE_FEATURE_RAW_PTR: usize = {
-        let mut feature = dwrite::DWRITE_TYPOGRAPHIC_FEATURES {
-            features: [
-                dwrite::DWRITE_FONT_FEATURE {
-                    nameTag: dwrite::DWRITE_FONT_FEATURE_TAG_STANDARD_LIGATURES,
-                    parameter: 0,
-                },
-            ].as_mut_ptr(),
-            featureCount: 1,
-        };
-        &mut feature as *const _ as *mut dwrite::DWRITE_TYPOGRAPHIC_FEATURES as usize
-    };
 }
 
 impl RasterizeExt for DirectWriteRasterizer {
@@ -323,16 +313,32 @@ impl RasterizeExt for DirectWriteRasterizer {
             let factory = (*DWRITE_FACTORY_RAW_PTR) as *mut dwrite::IDWriteFactory;
             let hr = (*factory).CreateTextAnalyzer(&mut native);
             assert_eq!(hr, 0, "IDWriteTextAnalyzer init fail");
-            let string: Vec<u16> = OsString::from(text).encode_wide().collect();
+            let string: Vec<u16> = text.encode_utf16().collect();
+            let max_glyphs = 3 * string.len() as u32 / 2 + 16;
             let sub = (*DWRITE_SUBSTITUTION_RAW_PTR) as *mut dwrite::IDWriteNumberSubstitution;
-            let mut cluster_map = vec![0u16, string.len() as u16];
+            let mut cluster_map = vec![0u16; string.len()];
             let mut text_props = vec![dwrite::DWRITE_SHAPING_TEXT_PROPERTIES { bit_fields: 0 }];
-            let mut glyph_indices = vec![0u16, string.len() as u16];
+            let mut glyph_indices = vec![0u16; max_glyphs as usize];
             let mut glyph_props = vec![dwrite::DWRITE_SHAPING_GLYPH_PROPERTIES { bit_fields: 0 }];
+
             let mut analysis = dwrite::DWRITE_SCRIPT_ANALYSIS {
                 script: 0,
                 shapes: dwrite::DWRITE_SCRIPT_SHAPES_DEFAULT,
             };
+            let liga = dwrite::DWRITE_FONT_FEATURE {
+                nameTag: dwrite::DWRITE_FONT_FEATURE_TAG_STANDARD_LIGATURES,
+                parameter: 1,
+            };
+            let calt = dwrite::DWRITE_FONT_FEATURE {
+                nameTag: dwrite::DWRITE_FONT_FEATURE_TAG_CONTEXTUAL_ALTERNATES,
+                parameter: 1,
+            };
+            let mut features_unit = dwrite::DWRITE_TYPOGRAPHIC_FEATURES {
+                features: [liga, calt].as_mut_ptr(),
+                featureCount: 2,
+            };
+            let features =
+                [&mut features_unit as *const dwrite::DWRITE_TYPOGRAPHIC_FEATURES].as_mut_ptr();
             let mut glyph_count = 0u32;
             let hr = (*native).GetGlyphs(
                 string.as_ptr(),
@@ -341,18 +347,22 @@ impl RasterizeExt for DirectWriteRasterizer {
                 false as winapi::ctypes::c_int,
                 false as winapi::ctypes::c_int,
                 &mut analysis as *const _ as *mut _,
-                LOCALE.as_ptr(),
+                (*LOCALE).as_ptr(),
                 sub,
-                (*DWRITE_FEATURE_RAW_PTR) as *mut *const _,
+                features,
                 [string.len() as u32].as_ptr(),
                 1,
-                string.len() as u32,
+                max_glyphs,
                 cluster_map.as_mut_ptr(),
                 text_props.as_mut_ptr(),
                 glyph_indices.as_mut_ptr(),
                 glyph_props.as_mut_ptr(),
                 &mut glyph_count as *mut _,
             );
+            (*native).Release();
+            if hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) {
+                panic!("invalid parameter");
+            }
             assert_eq!(hr, 0, "error get glyphs");
             glyph_indices
                 .iter()
