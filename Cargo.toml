@@ -12,10 +12,11 @@ keywords = ["font"]
 edition = "2018"
 
 [dependencies]
-euclid = "0.21"
+euclid = "0.22"
 libc = "0.2"
 foreign-types = "0.5"
 log = "0.4"
+lazy_static = "1.4.0"
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 servo-fontconfig = "0.5.1"
@@ -23,7 +24,7 @@ freetype-rs = "0.26"
 harfbuzz_rs = { version = "1.2.0", default-features = false, features = ["build-native-harfbuzz"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.23.0"
+cocoa = "0.23"
 core-foundation = "0.9"
 core-text = "19"
 core-graphics = "0.22"

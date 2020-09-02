@@ -281,7 +281,6 @@ pub struct Info {
 }
 
 /// Extends the Rasterizer with Harfbuzz specific functionality.
-#[cfg(not(windows))]
 pub trait RasterizeExt {
     /// Shape the provided text into a set of glyphs.
     fn shape(&mut self, text: &str, font_key: FontKey) -> Vec<Info>;
