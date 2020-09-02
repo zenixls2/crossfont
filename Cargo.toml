@@ -34,6 +34,7 @@ core-foundation-sys = "0.8"
 [target.'cfg(windows)'.dependencies]
 dwrote = { version = "0.11" }
 winapi = { version = "0.3", features = ["impl-default"] }
+wio = "0.2"
 
 [features]
 force_system_fontconfig = ["servo-fontconfig/force_system_lib"]
