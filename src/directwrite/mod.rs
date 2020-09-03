@@ -14,13 +14,13 @@ use dwrote::{
     GlyphRunAnalysis, TextAnalysisSource, TextAnalysisSourceMethods, DWRITE_GLYPH_RUN,
 };
 
-use lazy_static::lazy_static;
 use winapi::shared::ntdef::{HRESULT, LOCALE_NAME_MAX_LENGTH};
 use winapi::shared::winerror::*;
 use winapi::um::dwrite;
 use winapi::um::unknwnbase::IUnknown;
 use winapi::um::winnls::GetUserDefaultLocaleName;
 use winapi::Interface;
+use wio::com::ComPtr;
 
 use super::{
     BitmapBuffer, FontDesc, FontKey, GlyphKey, KeyType, Metrics, RasterizedGlyph, Size, Slant,
@@ -42,6 +42,8 @@ pub struct DirectWriteRasterizer {
     device_pixel_ratio: f32,
     available_fonts: FontCollection,
     fallback_sequence: Option<FontFallback>,
+    analyzer: ComPtr<dwrite::IDWriteTextAnalyzer>,
+    locale: Vec<u16>,
 }
 
 impl DirectWriteRasterizer {
@@ -160,12 +162,31 @@ impl crate::Rasterize for DirectWriteRasterizer {
         _: bool,
         _ligatures: bool,
     ) -> Result<DirectWriteRasterizer, Error> {
+        let analyzer = unsafe {
+            let mut factory: *mut dwrite::IDWriteFactory = std::ptr::null_mut();
+            let hr = dwrite::DWriteCreateFactory(
+                dwrite::DWRITE_FACTORY_TYPE_SHARED,
+                &dwrite::IDWriteFactory::uuidof(),
+                &mut factory as *mut *mut dwrite::IDWriteFactory as *mut *mut IUnknown,
+            );
+            assert_eq!(hr, 0, "error creating dwrite factory");
+            let mut native: *mut dwrite::IDWriteTextAnalyzer = std::ptr::null_mut();
+            let hr = (*factory).CreateTextAnalyzer(&mut native);
+            assert_eq!(hr, 0, "IDWriteTextAnalyzer init fail");
+            factory.as_ref().map(|x| x.Release());
+            ComPtr::from_raw(native)
+        };
+        let mut locale = vec![0u16; LOCALE_NAME_MAX_LENGTH];
+        let _locale_len =
+            unsafe { GetUserDefaultLocaleName(locale.as_mut_ptr(), locale.len() as i32) };
         Ok(DirectWriteRasterizer {
             fonts: HashMap::new(),
             keys: HashMap::new(),
             device_pixel_ratio,
             available_fonts: FontCollection::system(),
             fallback_sequence: FontFallback::get_system_fallback(),
+            analyzer,
+            locale,
         })
     }
 
@@ -269,53 +290,12 @@ impl crate::Rasterize for DirectWriteRasterizer {
     }
 }
 
-lazy_static! {
-    static ref LOCALE: Vec<u16> = {
-        let mut locale = vec![0u16; LOCALE_NAME_MAX_LENGTH];
-        let _locale_len = unsafe {
-            GetUserDefaultLocaleName(locale.as_mut_ptr(), locale.len() as i32)
-        };
-        locale
-    };
-    static ref DWRITE_FACTORY_RAW_PTR: usize = {
-        unsafe {
-            let mut factory: *mut dwrite::IDWriteFactory = std::ptr::null_mut();
-            let hr = dwrite::DWriteCreateFactory(
-                dwrite::DWRITE_FACTORY_TYPE_SHARED,
-                &dwrite::IDWriteFactory::uuidof(),
-                &mut factory as *mut *mut dwrite::IDWriteFactory as *mut *mut IUnknown,
-            );
-            assert_eq!(hr, 0, "error creating dwrite factory");
-            factory as usize
-        }
-    };
-    static ref DWRITE_SUBSTITUTION_RAW_PTR: usize = {
-        unsafe {
-            let factory = (*DWRITE_FACTORY_RAW_PTR) as *mut dwrite::IDWriteFactory;
-            let mut sub: *mut dwrite::IDWriteNumberSubstitution = std::ptr::null_mut();
-            let hr = (*factory).CreateNumberSubstitution(
-                dwrite::DWRITE_NUMBER_SUBSTITUTION_METHOD_FROM_CULTURE, // TODO
-                LOCALE.as_ptr(),
-                true as winapi::ctypes::c_int,
-                &mut sub,
-            );
-            assert_eq!(hr, 0, "error creating number substitution");
-            sub as usize
-        }
-    };
-}
-
 impl RasterizeExt for DirectWriteRasterizer {
     fn shape(&mut self, text: &str, font_key: FontKey) -> Vec<Info> {
         let face = &self.get_loaded_font(font_key).unwrap().face;
         unsafe {
-            let mut native: *mut dwrite::IDWriteTextAnalyzer = std::ptr::null_mut();
-            let factory = (*DWRITE_FACTORY_RAW_PTR) as *mut dwrite::IDWriteFactory;
-            let hr = (*factory).CreateTextAnalyzer(&mut native);
-            assert_eq!(hr, 0, "IDWriteTextAnalyzer init fail");
             let string: Vec<u16> = text.encode_utf16().collect();
             let max_glyphs = 3 * string.len() as u32 / 2 + 16;
-            let sub = (*DWRITE_SUBSTITUTION_RAW_PTR) as *mut dwrite::IDWriteNumberSubstitution;
             let mut cluster_map = vec![0u16; string.len()];
             let mut text_props = vec![dwrite::DWRITE_SHAPING_TEXT_PROPERTIES { bit_fields: 0 }];
             let mut glyph_indices = vec![0u16; max_glyphs as usize];
@@ -340,15 +320,15 @@ impl RasterizeExt for DirectWriteRasterizer {
             let features =
                 [&mut features_unit as *const dwrite::DWRITE_TYPOGRAPHIC_FEATURES].as_mut_ptr();
             let mut glyph_count = 0u32;
-            let hr = (*native).GetGlyphs(
+            let hr = (*self.analyzer).GetGlyphs(
                 string.as_ptr(),
                 string.len() as u32,
                 face.as_ptr(),
                 false as winapi::ctypes::c_int,
                 false as winapi::ctypes::c_int,
                 &mut analysis as *const _ as *mut _,
-                (*LOCALE).as_ptr(),
-                sub,
+                self.locale.as_ptr(),
+                std::ptr::null_mut(), // self.substitution.as_mut_ptr(),
                 features,
                 [string.len() as u32].as_ptr(),
                 1,
@@ -359,7 +339,6 @@ impl RasterizeExt for DirectWriteRasterizer {
                 glyph_props.as_mut_ptr(),
                 &mut glyph_count as *mut _,
             );
-            (*native).Release();
             if hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) {
                 panic!("invalid parameter");
             }
@@ -506,11 +485,21 @@ mod tests {
         let mut r = DirectWriteRasterizer::new(1.0, false, true).unwrap();
         let font_desc = FontDesc::new("Consolas", Style::Specific("Regular".to_string()));
         let font_key = r.load_font(&font_desc, Size(16)).unwrap();
+
+        let face = &r.get_loaded_font(font_key).unwrap().face;
+        let v: Vec<u16> = ['-', '-', '>', '<', '-']
+            .iter()
+            .map(|c| r.get_char_index(&face, *c).unwrap())
+            .collect();
+        println!("{:?}", v);
+
         let infos = r.shape("--><-", font_key);
         println!("{:?}", infos);
+
         let mut key = GlyphKey { id: 0.into(), font_key, size: Size(16) };
-        for info in infos.into_iter() {
+        for (info, index) in infos.into_iter().zip(v.into_iter()) {
             if info.codepoint != 0 {
+                assert_eq!(info.codepoint, index as u32);
                 key.id = info.codepoint.into();
                 r.get_glyph(key).unwrap();
             }

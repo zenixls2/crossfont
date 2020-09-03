@@ -16,7 +16,6 @@ euclid = "0.22"
 libc = "0.2"
 foreign-types = "0.5"
 log = "0.4"
-lazy_static = "1.4.0"
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 servo-fontconfig = "0.5.1"
@@ -33,6 +32,7 @@ core-foundation-sys = "0.8"
 [target.'cfg(windows)'.dependencies]
 dwrote = { version = "0.11" }
 winapi = { version = "0.3", features = ["impl-default"] }
+wio = "0.2"
 
 [features]
 force_system_fontconfig = ["servo-fontconfig/force_system_lib"]
