@@ -343,13 +343,30 @@ impl RasterizeExt for DirectWriteRasterizer {
                 panic!("invalid parameter");
             }
             assert_eq!(hr, 0, "error get glyphs");
+            assert!(
+                glyph_count <= string.len() as u32,
+                "glyph count more then string len is currently unsupported"
+            );
+            // not pretty sure about the mapping of cluster.
+            // and if codepoint won't be zero, there's no meaning to do such conversion.
+            let mut state = -1;
+            let clusters: Vec<u32> = cluster_map
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, shift)| {
+                    if state == *shift as i32 {
+                        None
+                    } else {
+                        state = *shift as i32;
+                        Some(i as u32)
+                    }
+                })
+                .collect();
             glyph_indices
                 .iter()
-                .zip(cluster_map.iter())
-                .map(|(codepoint, cluster)| Info {
-                    codepoint: *codepoint as u32,
-                    cluster: *cluster as u32,
-                })
+                .take(glyph_count as usize)
+                .enumerate()
+                .map(|(i, codepoint)| Info { codepoint: *codepoint as u32, cluster: clusters[i] })
                 .collect()
         }
     }
