@@ -93,7 +93,7 @@ impl DirectWriteRasterizer {
         );
 
         Ok(RasterizedGlyph {
-            character: KeyType::GlyphIndex(glyph_index),
+            character: KeyType::GlyphIndex(glyph_index.into()),
             width: (bounds.right - bounds.left) as i32,
             height: (bounds.bottom - bounds.top) as i32,
             top: -bounds.top,
@@ -112,6 +112,7 @@ impl DirectWriteRasterizer {
             .first()
             // DirectWrite returns 0 if the glyph does not exist in the font.
             .filter(|glyph_index| **glyph_index != 0)
+            .copied()
             .unwrap_or(MISSING_GLYPH_INDEX)
     }
 
@@ -280,16 +281,16 @@ impl crate::Rasterize for DirectWriteRasterizer {
                 }
                 index
             },
-            KeyType::GlyphIndex(index) => index,
+            KeyType::GlyphIndex(index) => index as u16,
             KeyType::Placeholder => {
-                return RasterizedGlyph {
+                return Ok(RasterizedGlyph {
                     character: KeyType::Placeholder,
                     width: 0,
                     height: 0,
                     top: 0,
                     left: 0,
                     buffer: BitmapBuffer::RGB(Vec::new()),
-                };
+                });
             },
         };
 
@@ -473,7 +474,7 @@ mod tests {
         for c in &['a', 'b', '!', '日'] {
             let key = GlyphKey { id: KeyType::Char(*c), font_key: font, size: Size::new(12.) };
             let glyph = rasterizer.get_glyph(key).unwrap();
-            let buf = match &glyph.buf {
+            let buf = match &glyph.buffer {
                 BitmapBuffer::RGB(buf) => buf,
                 BitmapBuffer::RGBA(buf) => buf,
             };
@@ -505,10 +506,8 @@ mod tests {
         let font_key = r.load_font(&font_desc, Size(16)).unwrap();
 
         let face = &r.get_loaded_font(font_key).unwrap().face;
-        let v: Vec<u16> = ['-', '-', '>', '<', '-']
-            .iter()
-            .map(|c| r.get_char_index(&face, *c).unwrap())
-            .collect();
+        let v: Vec<u16> =
+            ['-', '-', '>', '<', '-'].iter().map(|c| r.get_char_index(&face, *c)).collect();
         println!("{:?}", v);
 
         let infos = r.shape("--><-", font_key);

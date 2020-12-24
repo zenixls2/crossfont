@@ -239,14 +239,14 @@ impl Rasterize for Rasterizer {
         }
 
         // Placeholder
-        RasterizedGlyph {
+        Ok(RasterizedGlyph {
             character: KeyType::Placeholder,
             width: 0,
             height: 0,
             top: 0,
             left: 0,
             buffer: BitmapBuffer::RGB(Vec::new()),
-        }
+        })
     }
 
     fn update_dpr(&mut self, device_pixel_ratio: f32) {
@@ -461,7 +461,9 @@ impl Font {
     }
 
     pub fn get_glyph(&self, glyph_index: u32, use_thin_strokes: bool) -> RasterizedGlyph {
-        let bounds = self.bounding_rect_for_glyph(Default::default(), glyph_index);
+        let bounds = self
+            .ct_font
+            .get_bounding_rects_for_glyphs(CTFontOrientation::default(), &[glyph_index as CGGlyph]);
 
         let rasterized_left = bounds.origin.x.floor() as i32;
         let rasterized_width =
@@ -600,7 +602,7 @@ mod tests {
             // Get a glyph.
             for character in &['a', 'b', 'c', 'd'] {
                 let glyph_index = font.glyph_index(*character);
-                let glyph = font.get_glyph((*character).into(), glyph_index, false);
+                let glyph = font.get_glyph(glyph_index, false);
 
                 let buffer = match &glyph.buffer {
                     BitmapBuffer::RGB(buffer) | BitmapBuffer::RGBA(buffer) => buffer,
